@@ -26,12 +26,11 @@
 
 
 # Note: The deserialization code originally comes from ABE.
+from typing import Sequence, NamedTuple, Iterable, Optional
+from struct import pack
 
-from typing import Sequence, Union, NamedTuple, Tuple, Optional, Iterable
+from .util import profiler
 
-from .util import print_error, profiler
-
-from . import ecc
 from . import bitcoin
 from .bitcoin import *
 import struct
@@ -45,6 +44,7 @@ from .keystore import xpubkey_to_address, xpubkey_to_pubkey
 
 NO_SIGNATURE = 'ff'
 PARTIAL_TXN_HEADER_MAGIC = b'EPTF\xff'
+PSBT_TXN_HEADER_MAGIC = b'psbt\xff'
 
 
 class SerializationError(Exception):
@@ -583,6 +583,15 @@ def deserialize(raw: str, force_full_parse=False) -> dict:
             raise SerializationError('unknown tx partial serialization format version: {}'
                                      .format(partial_format_version))
         raw_bytes = raw_bytes[6:]
+    elif raw_bytes[:5] == PSBT_TXN_HEADER_MAGIC:
+        try:
+            parsed = psbt_parser(raw_bytes)
+            print('PSBT deser')
+            d.update(parsed)
+            d['partial'] = is_partial = True
+            return d
+        except:
+            pass
     else:
         d['partial'] = is_partial = False
     full_parse = force_full_parse or is_partial
@@ -622,8 +631,6 @@ def multisig_script(public_keys: Sequence[str], m: int) -> str:
     op_n = format(opcodes.OP_1 + n - 1, 'x')
     keylist = [op_push(len(k)//2) + k for k in public_keys]
     return op_m + ''.join(keylist) + op_n + 'ae'
-
-
 
 
 class Transaction:
@@ -1033,6 +1040,23 @@ class Transaction:
         else:
             return network_ser
 
+
+    def psbt_serialize(self, wallet, estimate_size=False, witness=True) -> str:
+        # if wallet.wallet_type not in ('standard', 'multisig'):
+        #     return 'None'
+        wallet.get_master_public_keys()
+
+        network_ser = self.serialize_to_network(estimate_size, witness)
+        print('psbt_ns', network_ser)
+        if estimate_size:
+            return network_ser
+        if self.is_partial_originally and not self.is_complete():
+            res = self.build_psbt(wallet)
+            print('PSBT', res)
+            return res
+        else:
+            return network_ser
+
     def serialize_to_network(self, estimate_size=False, witness=True):
         nVersion = int_to_hex(self.version, 4)
         nLocktime = int_to_hex(self.locktime, 4)
@@ -1214,6 +1238,17 @@ class Transaction:
     def as_dict(self):
         if self.raw is None:
             self.raw = self.serialize()
+        self.deserialize()
+        out = {
+            'hex': self.raw,
+            'complete': self.is_complete(),
+            'final': self.is_final(),
+        }
+        return out
+
+    def psbt_as_dict(self, wallet):
+        if self.raw is None:
+            self.raw = self.psbt_serialize(wallet)
         self.deserialize()
         out = {
             'hex': self.raw,

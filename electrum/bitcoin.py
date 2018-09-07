@@ -24,7 +24,8 @@
 # SOFTWARE.
 
 import hashlib
-from typing import List
+import io
+from typing import List, Union, Tuple
 
 from .util import bfh, bh2u, BitcoinException, print_error, assert_bytes, to_bytes, inv_dict
 from . import version
@@ -90,16 +91,62 @@ def script_num_to_hex(i: int) -> str:
     return bh2u(result)
 
 
-def var_int(i: int) -> str:
+def var_int(i: int, binary=False) -> Union[str, bytes]:
     # https://en.bitcoin.it/wiki/Protocol_specification#Variable_length_integer
-    if i<0xfd:
-        return int_to_hex(i)
-    elif i<=0xffff:
-        return "fd"+int_to_hex(i,2)
-    elif i<=0xffffffff:
-        return "fe"+int_to_hex(i,4)
+    if i < 0xfd:  # 253
+        out = int_to_hex(i)
+    elif i <= 0xffff:
+        out = "fd" + int_to_hex(i, 2)  # 253
+    elif i <= 0xffffffff:
+        out = "fe" + int_to_hex(i, 4)  # 254
     else:
-        return "ff"+int_to_hex(i,8)
+        out = "ff" + int_to_hex(i, 8)  # 255
+
+    if binary:
+        return bytes.fromhex(out)
+    else:
+        return out
+
+
+def varint_to_int(data):
+    """
+    parses input stream until complete varint found
+    returns int and rest of stream
+    :param data: Union[str, bytes, io.BytesIO]
+    :return: Tuple[Union[None, int], Union[str, bytes, io.BytesIO]]
+    """
+    if isinstance(data, str):
+        stream = io.BytesIO(bfh(data))
+        builder = lambda stream, read: bh2u(stream.getvalue()[read:])
+    elif isinstance(data, bytes):
+        stream = io.BytesIO(data)
+        builder = lambda stream, read: stream.getvalue()[read:]
+    elif isinstance(data, io.BytesIO):
+        stream = data
+        builder = lambda stream, read: stream
+    else:
+        raise Exception('Invalid data')
+
+    read = 0
+    _len = stream.read(1)
+    if _len == b'':
+        return None, builder(stream, read)
+
+    _len = _len[0]
+    read += 1
+    if _len < 253:
+        return _len, builder(stream, read)
+
+    if _len == 253:
+        raw = stream.read(2)
+        read += 2
+    elif _len == 254:
+        raw = stream.read(4)
+        read += 4
+    elif _len == 255:
+        raw = stream.read(8)
+        read += 8
+    return int.from_bytes(raw, 'little'), builder(stream, read)
 
 
 def witness_push(item: str) -> str:
@@ -145,6 +192,10 @@ def push_script(data: str) -> str:
 
 def add_number_to_script(i: int) -> bytes:
     return bfh(push_script(script_num_to_hex(i)))
+
+
+def fingerprint160(key):
+    return hash_160(key)[0:4]
 
 
 hash_encode = lambda x: bh2u(x[::-1])
@@ -679,10 +730,10 @@ def is_xprv(text):
         return False
 
 
-def xpub_from_xprv(xprv):
-    xtype, depth, fingerprint, child_number, c, k = deserialize_xprv(xprv)
+def xpub_from_xprv(xprv, net=None):
+    xtype, depth, fingerprint, child_number, c, k = deserialize_xprv(xprv, net=net)
     cK = ecc.ECPrivkey(k).get_public_key_bytes(compressed=True)
-    return serialize_xpub(xtype, c, cK, depth, fingerprint, child_number)
+    return serialize_xpub(xtype, c, cK, depth, fingerprint, child_number, net=net)
 
 
 def bip32_root(seed, xtype):
@@ -729,6 +780,22 @@ def convert_bip32_path_to_list_of_uint32(n: str) -> List[int]:
         path.append(abs(int(x)) | prime)
     return path
 
+
+def convert_raw_uint32_to_bip32_path(raw: bytes) -> str:
+    out = ''
+    if len(raw) % 4:
+        raise ValueError('not uint32 data')
+    while len(raw):
+        i = int.from_bytes(raw[:4], 'little')
+        if i & BIP32_PRIME:
+            out += "/{}'".format(i & ~BIP32_PRIME)
+        else:
+            out += '/{}'.format(i)
+        raw = raw[4:]
+    print(out)
+    return out
+
+
 def is_bip32_derivation(x):
     try:
         [ i for i in bip32_derivation(x)]
@@ -736,13 +803,14 @@ def is_bip32_derivation(x):
     except :
         return False
 
-def bip32_private_derivation(xprv, branch, sequence):
+
+def bip32_private_derivation(xprv, branch, sequence, net=None):
     if not sequence.startswith(branch):
         raise ValueError('incompatible branch ({}) and sequence ({})'
                          .format(branch, sequence))
     if branch == sequence:
         return xprv, xpub_from_xprv(xprv)
-    xtype, depth, fingerprint, child_number, c, k = deserialize_xprv(xprv)
+    xtype, depth, fingerprint, child_number, c, k = deserialize_xprv(xprv, net=net)
     sequence = sequence[len(branch):]
     for n in sequence.split('/'):
         if n == '': continue
@@ -751,16 +819,16 @@ def bip32_private_derivation(xprv, branch, sequence):
         k, c = CKD_priv(k, c, i)
         depth += 1
     parent_cK = ecc.ECPrivkey(parent_k).get_public_key_bytes(compressed=True)
-    fingerprint = hash_160(parent_cK)[0:4]
+    fingerprint = fingerprint160(parent_cK)
     child_number = bfh("%08X"%i)
     cK = ecc.ECPrivkey(k).get_public_key_bytes(compressed=True)
-    xpub = serialize_xpub(xtype, c, cK, depth, fingerprint, child_number)
-    xprv = serialize_xprv(xtype, c, k, depth, fingerprint, child_number)
+    xpub = serialize_xpub(xtype, c, cK, depth, fingerprint, child_number, net=net)
+    xprv = serialize_xprv(xtype, c, k, depth, fingerprint, child_number, net=net)
     return xprv, xpub
 
 
-def bip32_public_derivation(xpub, branch, sequence):
-    xtype, depth, fingerprint, child_number, c, cK = deserialize_xpub(xpub)
+def bip32_public_derivation(xpub, branch, sequence, net=None):
+    xtype, depth, fingerprint, child_number, c, cK = deserialize_xpub(xpub, net=net)
     if not sequence.startswith(branch):
         raise ValueError('incompatible branch ({}) and sequence ({})'
                          .format(branch, sequence))
@@ -771,9 +839,9 @@ def bip32_public_derivation(xpub, branch, sequence):
         parent_cK = cK
         cK, c = CKD_pub(cK, c, i)
         depth += 1
-    fingerprint = hash_160(parent_cK)[0:4]
+    fingerprint = fingerprint160(parent_cK)
     child_number = bfh("%08X"%i)
-    return serialize_xpub(xtype, c, cK, depth, fingerprint, child_number)
+    return serialize_xpub(xtype, c, cK, depth, fingerprint, child_number, net=net)
 
 
 def bip32_private_key(sequence, k, chain):

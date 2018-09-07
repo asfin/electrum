@@ -137,6 +137,9 @@ class TxDialog(QDialog, MessageBoxMixin):
         self.export_button = b = QPushButton(_("Export"))
         b.clicked.connect(self.export)
 
+        self.psbt_export_button = b = QPushButton(_("PSBT export"))
+        b.clicked.connect(self.psbt_export)
+
         self.cancel_button = b = QPushButton(_("Close"))
         b.clicked.connect(self.close)
         b.setDefault(True)
@@ -150,7 +153,7 @@ class TxDialog(QDialog, MessageBoxMixin):
         # Action buttons
         self.buttons = [self.sign_button, self.broadcast_button, self.cancel_button]
         # Transaction sharing buttons
-        self.sharing_buttons = [self.copy_button, self.qr_button, self.export_button, self.save_button]
+        self.sharing_buttons = [self.copy_button, self.qr_button, self.export_button, self.psbt_export_button, self.save_button]
 
         run_hook('transaction_dialog', self)
 
@@ -223,6 +226,17 @@ class TxDialog(QDialog, MessageBoxMixin):
                 f.write(json.dumps(self.tx.as_dict(), indent=4) + '\n')
             self.show_message(_("Transaction exported successfully"))
             self.saved = True
+
+    def psbt_export(self):
+        wallet = self.wallet
+        print(json.dumps(self.tx.psbt_as_dict(wallet=wallet), indent=4) + '\n')
+        # name = 'signed_%s.txn' % (self.tx.txid()[0:8]) if self.tx.is_complete() else 'unsigned.txn'
+        # fileName = self.main_window.getSaveFileName(_("Select where to save your signed transaction"), name, "*.txn")
+        # if fileName:
+        #     with open(fileName, "w+") as f:
+        #         f.write(json.dumps(self.tx.as_dict(), indent=4) + '\n')
+        #     self.show_message(_("Transaction exported successfully"))
+        #     self.saved = True
 
     def update(self):
         desc = self.desc

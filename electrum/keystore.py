@@ -650,7 +650,7 @@ def xpubkey_to_address(x_pubkey):
         address = public_key_to_p2pkh(bfh(pubkey))
     return pubkey, address
 
-def xpubkey_to_pubkey(x_pubkey):
+def xpubkey_to_pubkey(x_pubkey: str):
     pubkey, address = xpubkey_to_address(x_pubkey)
     return pubkey
 
